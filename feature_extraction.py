@@ -18,10 +18,15 @@ import statsmodels.api as sm
 
 from numpy.fft import fft, ifft
 from statistics import mode, median, quantiles
+from sklearn.linear_model import LinearRegression
 
 from scipy.signal import find_peaks
 
 #Helper functions
+from scipy.stats import iqr
+from sklearn.metrics import r2_score
+
+
 def distance(x0,y0,x1,y1):
     '''
     Distance in cartesian coordinate system
@@ -66,7 +71,7 @@ def get_length(filename):
     '''
     Given a video filename, find its length in seconds.
     '''
-    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+    result = subprocess.run(["C:\\ffmpeg\\bin\\ffprobe", "-v", "error", "-show_entries",
                              "format=duration", "-of",
                              "default=noprint_wrappers=1:nokey=1", filename],
         stdout=subprocess.PIPE,
@@ -219,7 +224,7 @@ class HandTrackerCustomized():
     '''
     Use mediapipe to track coordinates of finger joints
     '''
-    def __init__(self, mode=False, maxHands=2, detectionCon=0.5,modelComplexity=1,trackCon=0.5):
+    def __init__(self, mode=False, maxHands=2, detectionCon=0.5,modelComplexity=1,trackCon=0.5): #default 0.5
         '''
         Default initialization, maxHands is set to 2 since both hands are visible in some videos
         '''
@@ -273,22 +278,25 @@ class HandTrackerCustomized():
                 SINGLE_HANDED = True
                 which_hand = self.results.multi_handedness[0].classification[0].label
                 conf_score = self.results.multi_handedness[0].classification[0].score
-                
-                if which_hand==t_label[hand] and conf_score>0.9:
+               # print("It's a "+which_hand+" hand with confidence "+str(conf_score))
+
+                if which_hand==t_label[hand] and conf_score>0.9: #originally and condition and 0.9
                     LH_INDEX = 0
                 
             else:
                 '''
                 Mediapipe detects multiple hands.
                 Find out the desired hand and set the index accordingly. If only one hand, all good!
-                If none of the hands is the desired one, the index remains -1.
+                If none of the hands is the desired one, the index remains -1. //remove the control on the desidered one, any hand is ok
                 If two desired hands (most likely, multiple people in the camera), select the bigger hand.
                 If more than two desired hand, this is an exceptional case we need to re-implement. For now, return undetected hand (-1).
                 '''
                 indexes = []
                 
                 for j in range(0,len(self.results.multi_handedness)):
-                    if self.results.multi_handedness[j].classification[0].label==t_label[hand] and self.results.multi_handedness[j].classification[0].score>0.9:
+
+                  #  print("Multi hand case, i have found a "+ self.results.multi_handedness[j].classification[0].label+" hand with confidence"+str(self.results.multi_handedness[j].classification[0].score))
+                    if self.results.multi_handedness[j].classification[0].label==t_label[hand] and self.results.multi_handedness[j].classification[0].score>0.9: #originally confidence is 0.9, with a and condition
                         indexes.append(j)
                         
                 if len(indexes)==1:
@@ -296,7 +304,8 @@ class HandTrackerCustomized():
                     
                 elif len(indexes)==2:
                     #Calculate size and pick the bigger one
-                    print("Both hands detected as %s\n"%(hand))
+                   # print("Both hands detected as %s\n"%(hand))
+
                     handLms0 = self.results.multi_hand_landmarks[indexes[0]]
                     handLms1 = self.results.multi_hand_landmarks[indexes[1]]
         
@@ -350,7 +359,7 @@ class Signal:
     FREEZE_SPEED_THRESHOLD = 50 #degree per second
     FREEZE_MIN_DURATION = 0.30 #second
         
-    def __init__(self, raw, wrist_raw, num_frames, duration):
+    def __init__(self, raw, wrist_raw, num_frames, duration, filepath):
         self.raw_signal = raw
         self.wrist_raw = wrist_raw
         self.raw_fft = fft(self.raw_signal)
@@ -360,10 +369,10 @@ class Signal:
         self.denoised_signal, self.wrist_denoised = self.interpolation_and_denoise()
         
         self.peaks_denoised = self.peak_detection(self.denoised_signal)
-        self.peaks_trimmed = np.asarray(self.peaks_denoised[1:-1]-self.peaks_denoised[1])
+        self.peaks_trimmed = np.asarray(self.peaks_denoised[1:-1]-self.peaks_denoised[1]) if len(self.peaks_denoised[1:-2])>=3 else self.peaks_denoised
         
-        self.trimmed_signal = np.asarray(self.denoised_signal[self.peaks_denoised[1]:(self.peaks_denoised[-2]+1)])
-        self.wrist_trimmed = self.wrist_denoised[self.peaks_denoised[1]:(self.peaks_denoised[-2]+1)]
+        self.trimmed_signal = np.asarray(self.denoised_signal[self.peaks_denoised[1]:(self.peaks_denoised[-2]+1)]) if len(self.peaks_denoised[1:-2])>=3 else np.asarray(self.denoised_signal)
+        self.wrist_trimmed = self.wrist_denoised[self.peaks_denoised[1]:(self.peaks_denoised[-2]+1)] if len(self.peaks_denoised[1:-2])>=3 else self.wrist_denoised
         
         self.signals = {'r':self.raw_signal, 'd':self.denoised_signal, 't':self.trimmed_signal}
         self.peaks = {'d':self.peaks_denoised, 't':self.peaks_trimmed}
@@ -373,12 +382,17 @@ class Signal:
         self.speed_trimmed = []
         self.acceleration_denoised = []
         self.acceleration_trimmed = []
-        
+        self.drawing_path=filepath
+
+        #by default draw the signal
+        self.draw_signals()
+
         for i in range(1,len(self.peaks_denoised)):
             self.periods_denoised.append((self.peaks_denoised[i]-self.peaks_denoised[i-1])*self.PER_FRAME_DURATION)
             
         for i in range(1,len(self.peaks_trimmed)):
-            self.periods_trimmed.append((self.peaks_trimmed[i]-self.peaks_trimmed[i-1])*self.PER_FRAME_DURATION)
+            self.periods_trimmed.append((self.peaks_trimmed[i]-self.peaks_trimmed[i-1])*self.PER_FRAME_DURATION) if len(self.peaks_denoised[1:-2])>=3 \
+            else self.periods_trimmed.append((self.peaks_denoised[i]-self.peaks_denoised[i-1])*self.PER_FRAME_DURATION)
         
         for i in range(0,len(self.denoised_signal)-1):
             self.speed_denoised.append(self.denoised_signal[i+1]-self.denoised_signal[i])
@@ -387,7 +401,8 @@ class Signal:
         self.speed_denoised = self.speed_denoised/self.PER_FRAME_DURATION #degree per second
         
         for i in range(0,len(self.trimmed_signal)-1):
-            self.speed_trimmed.append(self.trimmed_signal[i+1]-self.trimmed_signal[i])
+            self.speed_trimmed.append(self.trimmed_signal[i+1]-self.trimmed_signal[i])  if len(self.peaks_denoised[1:-2])>=3 \
+            else self.speed_trimmed.append(self.denoised_signal[i+1]-self.denoised_signal[i])
             
         self.speed_trimmed = np.asarray(self.speed_trimmed) #degree per frame
         self.speed_trimmed = self.speed_trimmed/self.PER_FRAME_DURATION #degree per second
@@ -400,7 +415,8 @@ class Signal:
         self.acceleration_denoised = self.acceleration_denoised/self.PER_FRAME_DURATION #degree per second2
         
         for i in range(0,len(self.speed_trimmed)-1):
-            self.acceleration_trimmed.append(self.speed_trimmed[i+1]-self.speed_trimmed[i])
+            self.acceleration_trimmed.append(self.speed_trimmed[i+1]-self.speed_trimmed[i]) if len(self.peaks_denoised[1:-2])>=3 \
+            else self.acceleration_trimmed.append(self.speed_denoised[i+1]-self.speed_denoised[i])
             
         self.acceleration_trimmed = np.asarray(self.acceleration_trimmed) #degree per frame*second
         self.acceleration_trimmed = self.acceleration_trimmed/self.PER_FRAME_DURATION #degree per second2
@@ -599,6 +615,34 @@ class Signal:
         
         return feats
 
+    def draw_signals(self):
+        # Create subplots with 3 rows and 1 column
+        fig, axs = plt.subplots(3, 1, figsize=(8, 12), sharex=True)
+
+        # Plot each signal in a separate subplot
+        axs[0].plot(self.signals['t'], c='blue', label='trimmed')
+        axs[0].set_ylabel('Angle')
+        axs[0].set_title('Trimmed Signal')
+        axs[0].legend()
+
+        axs[1].plot(self.signals['r'], c='red', label='raw')
+        axs[1].set_ylabel('Angle')
+        axs[1].set_title('Raw Signal')
+        axs[1].legend()
+
+        axs[2].plot(self.signals['d'], c='green', label='denoised')
+        axs[2].set_xlabel('Time')
+        axs[2].set_ylabel('Angle')
+        axs[2].set_title('Denoised Signal')
+        axs[2].legend()
+
+        # Adjust layout for better spacing
+        plt.tight_layout()
+
+        # Save the figure
+        plt.savefig(os.path.join(self.drawing_path, "angular_trajectory.png"), dpi=300)
+        plt.close()
+
 #Feature extractor from MediaPipe Key Points
 def get_final_features(data):
     '''
@@ -611,7 +655,7 @@ def get_final_features(data):
     }
     '''
     
-    signal = Signal(data['D_raw'], data['W_raw'], data['num_frames'], data['duration'])
+    signal = Signal(data['D_raw'], data['W_raw'], data['num_frames'], data['duration'], data['saving_path'])
     
     '''
     Features related to wrist movement (horizontal, vertical, and in cartesian coord)
@@ -633,7 +677,7 @@ def get_final_features(data):
     features['numFreeze_trimmed'] = signal.freeze_count('t')
     features['maxFreezeDuration_denoised'] = signal.max_freeze_duration('d')
     features['maxFreezeDuration_trimmed'] = signal.max_freeze_duration('t')
-    
+    features['label']=data['label']
     '''
     Statistics of Period, Frequency, and Amplitude
     '''
@@ -714,6 +758,22 @@ def get_final_features(data):
     return features
 
 
+def deinterlace_with_ffmpeg(input_file, output_file):
+    # FFmpeg command to deinterlace using the bwdif filter
+    cmd = [
+        'C:\\ffmpeg\\bin\\ffmpeg',
+        '-i', input_file,            # Input video file
+        '-vf', 'bwdif',              # Use the bwdif filter for deinterlacing
+        '-c:a', 'copy',              # Copy audio codec
+        output_file                   # Output video file
+    ]
+
+    # Run FFmpeg command
+    subprocess.run(cmd)
+
+    print("Deinterlacing complete. Output saved to", output_file)
+
+
 #Extract features from a given file and specified target hand
 def extract_features(filename, output_path, hand, labels=(0,"")):
     '''
@@ -735,11 +795,11 @@ def extract_features(filename, output_path, hand, labels=(0,"")):
     features = {}
     
     base_file = os.path.basename(filename)
-    base_file = base_file[0:base_file.find(".webm")]
+    base_file = base_file[0:base_file.find(".avi")] #NB: changed to avi to process OUR DATA!!!
     
     full_dir_path = os.path.join(FEATURE_DIR,base_file)
     if not os.path.exists(full_dir_path):
-        os.mkdir(full_dir_path)
+        os.makedirs(full_dir_path)
     
     full_dir_path = os.path.join(full_dir_path,hand.upper())
     
@@ -758,7 +818,11 @@ def extract_features(filename, output_path, hand, labels=(0,"")):
     annotation_json_path = os.path.join(full_dir_path,"MP Annotation JSON")
     os.mkdir(annotation_image_path)
     os.mkdir(annotation_json_path)
-    
+
+    #deinterlace videos
+    #deinterlace_with_ffmpeg(filename, os.path.join(full_dir_path,"deinterlaced.avi"))
+
+    #cap = cv.VideoCapture( os.path.join(full_dir_path,"deinterlaced.avi"))
     cap = cv.VideoCapture(filename)
     
     tracker = HandTrackerCustomized()
@@ -778,6 +842,7 @@ def extract_features(filename, output_path, hand, labels=(0,"")):
 
         width  = (int)(cap.get(cv.CAP_PROP_FRAME_WIDTH))
         height = (int)(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+
         #print(width, height)
         
         if NUM_FRAMES==1:
@@ -848,6 +913,7 @@ def extract_features(filename, output_path, hand, labels=(0,"")):
     INT_FEATS = {}
     INT_FEATS["D_raw"] = np.asarray(D)
     INT_FEATS["W_raw"] = W
+    INT_FEATS['label']=labels[0]
     
     #Video Processing Done
     DURATION = get_length(filename)
@@ -856,7 +922,7 @@ def extract_features(filename, output_path, hand, labels=(0,"")):
     
     INT_FEATS["duration"] = DURATION
     INT_FEATS["num_frames"] = NUM_FRAMES
-    
+    INT_FEATS['saving_path']=full_dir_path
     with open(os.path.join(full_dir_path,"intermediate_features.pkl"), 'wb') as handle:
         pickle.dump(INT_FEATS, handle, protocol=pickle.HIGHEST_PROTOCOL)
             
